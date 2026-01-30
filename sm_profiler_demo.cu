@@ -9,21 +9,22 @@
 #include "sm_profiler.h"
 
 /* Example kernel that uses the profiler */
-__global__ void demo_kernel(uint64_t* profiler_buffer, int num_iterations) {
-    /* Each warp is a profiling group, only lane 0 writes events */
-    int warp_id = threadIdx.x / 32;
-    int num_warps = blockDim.x / 32;
+__global__ void demo_kernel(uint64_t* profiler_buffer, int num_blocks, int max_events_per_block, int num_iterations) {
+    /* Lane id for predicate */
     int lane_id = threadIdx.x % 32;
+    bool is_lane_0 = (lane_id == 0);
     
-    /* Declare profiler variables */
-    SM_PROFILER_DECL_VARS;
+    /* Initialize profiler */
+    sm_profiler_init(profiler_buffer, num_blocks, max_events_per_block);
     
-    /* Initialize profiler for this block/group */
-    SM_PROFILER_INIT(profiler_buffer, warp_id, num_warps, lane_id == 0);
+    /* Create event types (only lane 0, once per block) */
+    uint32_t evt_compute = sm_profiler_create_event(profiler_buffer, "compute", is_lane_0);
+    uint32_t evt_memory = sm_profiler_create_event(profiler_buffer, "memory", is_lane_0);
+    uint32_t evt_sync = sm_profiler_create_event(profiler_buffer, "sync", is_lane_0);
     
     for (int iter = 0; iter < num_iterations; iter++) {
         /* Start of computation phase */
-        SM_PROFILER_EVENT_START(0, iter);  /* event_id=0, event_no=iter */
+        sm_profiler_event_start(profiler_buffer, evt_compute, is_lane_0);
         
         /* Simulate some work */
         float sum = 0.0f;
@@ -31,17 +32,17 @@ __global__ void demo_kernel(uint64_t* profiler_buffer, int num_iterations) {
             sum += threadIdx.x * 0.001f;
         }
         
-        SM_PROFILER_EVENT_END(0, iter);
+        sm_profiler_event_end(profiler_buffer, evt_compute, is_lane_0);
         
         /* Memory phase */
-        SM_PROFILER_EVENT_START(1, iter);  /* event_id=1 */
+        sm_profiler_event_start(profiler_buffer, evt_memory, is_lane_0);
         
         __syncthreads();
         
-        SM_PROFILER_EVENT_END(1, iter);
+        sm_profiler_event_end(profiler_buffer, evt_memory, is_lane_0);
         
         /* Sync point */
-        SM_PROFILER_EVENT_INSTANT(2, iter);  /* event_id=2, instant */
+        sm_profiler_event_instant(profiler_buffer, evt_sync, is_lane_0);
         
         __syncthreads();
     }
@@ -55,45 +56,43 @@ int main() {
         fprintf(stderr, "CUDA not available\n");
         return 1;
     }
-    
+
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, device);
     printf("Device: %s\n", prop.name);
-    
+
     /* Configuration */
     const int num_blocks = 4;
     const int num_threads = 128;
-    const int num_warps = num_threads / 32;  /* 4 warps per block */
     const int num_iterations = 3;
-    const int max_events_per_warp = num_iterations * 6;  /* 3 events per iteration, begin+end each */
-    
+    const int events_per_iteration = 3;
+    const int max_events_per_block = num_iterations * events_per_iteration + 10;
+
     printf("\nConfiguration:\n");
     printf("  Blocks: %d\n", num_blocks);
     printf("  Threads per block: %d\n", num_threads);
-    printf("  Warps per block (profiling groups): %d\n", num_warps);
     printf("  Iterations: %d\n", num_iterations);
-    printf("  Max events per warp: %d\n", max_events_per_warp);
-    
+    printf("  Max events per block: %d\n", max_events_per_block);
+
     /* Create profiler buffer */
     printf("\nCreating profiler buffer...\n");
     sm_profiler_buffer_t profiler = sm_profiler_create_buffer(
         num_blocks, 
-        num_warps, 
-        max_events_per_warp
+        max_events_per_block
     );
-    
+
     if (!profiler) {
         fprintf(stderr, "Failed to create profiler buffer\n");
         return 1;
     }
-    
+
     /* Get device pointer for kernel */
     uint64_t* device_ptr = sm_profiler_get_device_ptr(profiler);
-    
+
     /* Launch kernel */
     printf("Launching kernel...\n");
-    demo_kernel<<<num_blocks, num_threads>>>(device_ptr, num_iterations);
-    
+    demo_kernel<<<num_blocks, num_threads>>>(device_ptr, num_blocks, max_events_per_block, num_iterations);
+
     /* Check for errors */
     err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -101,7 +100,7 @@ int main() {
         sm_profiler_destroy_buffer(profiler);
         return 1;
     }
-    
+
     /* Synchronize */
     err = cudaDeviceSynchronize();
     if (err != cudaSuccess) {
@@ -109,31 +108,24 @@ int main() {
         sm_profiler_destroy_buffer(profiler);
         return 1;
     }
-    
+
     printf("Kernel completed\n");
-    
+
     /* Export trace to JSON */
     printf("\nExporting trace...\n");
-    
-    /* Define event names (optional) */
-    const char* event_names[] = {
-        "compute",   /* event_id = 0 */
-        "memory",    /* event_id = 1 */
-        "sync",      /* event_id = 2 */
-    };
-    
-    int ret = sm_profiler_export_to_file(profiler, "sm_profile.json", event_names);
+
+    int ret = sm_profiler_export_to_file(profiler, "sm_profile.json");
     if (ret != 0) {
         fprintf(stderr, "Failed to export trace\n");
         sm_profiler_destroy_buffer(profiler);
         return 1;
     }
-    
+
     printf("Trace saved to sm_profile.json\n");
     printf("\nTo view: Open sm_profile.json in Chrome chrome://tracing or https://ui.perfetto.dev/\n");
-    
+
     /* Cleanup */
     sm_profiler_destroy_buffer(profiler);
-    
+
     return 0;
 }
