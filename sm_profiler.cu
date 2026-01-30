@@ -324,6 +324,8 @@ int sm_profiler_export_to_file(
         if (event_name[0] == '\0') {
             event_name = "unknown";
         }
+        char event_name_id[128];
+        snprintf(event_name_id, sizeof(event_name_id), "%s_%u", event_name, ev->event_id);
 
         /* Calculate relative timestamp in microseconds (Chrome trace format uses us) */
         double ts_us = (double)(ev->st_timestamp_ns - min_timestamp) / 1000.0;
@@ -338,14 +340,14 @@ int sm_profiler_export_to_file(
             first_entry = 0;
             
             fprintf(fp, "    {\"name\": \"%s\", \"ph\": \"B\", \"ts\": %.3f, \"pid\": %u, \"tid\": \"%s\", \"cat\": \"gpu\"}",
-                    event_name, ts_us, ev->sm_id, tid_str);
+                    event_name_id, ts_us, ev->sm_id, tid_str);
             output_count++;
             
             /* Range event - End */
             double end_ts_us = (double)(ev->en_timestamp_ns - min_timestamp) / 1000.0;
             fprintf(fp, ",\n");
             fprintf(fp, "    {\"name\": \"%s\", \"ph\": \"E\", \"ts\": %.3f, \"pid\": %u, \"tid\": \"%s\", \"cat\": \"gpu\"}",
-                    event_name, end_ts_us, ev->sm_id, tid_str);
+                    event_name_id, end_ts_us, ev->sm_id, tid_str);
             output_count++;
         } else {
             /* Instant event */
@@ -353,7 +355,7 @@ int sm_profiler_export_to_file(
             first_entry = 0;
             
             fprintf(fp, "    {\"name\": \"%s\", \"ph\": \"i\", \"ts\": %.3f, \"pid\": %u, \"tid\": \"%s\", \"cat\": \"gpu\", \"s\": \"t\"}",
-                    event_name, ts_us, ev->sm_id, tid_str);
+                    event_name_id, ts_us, ev->sm_id, tid_str);
             output_count++;
         }
     }
