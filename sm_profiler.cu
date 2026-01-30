@@ -9,21 +9,54 @@
 
 struct sm_profiler_buffer {
     uint32_t num_blocks;
-    uint32_t max_events_per_block;
+    uint32_t num_groups;
+    uint32_t max_events_per_group;
     uint64_t* device_ptr;
     uint64_t* host_copy;
     size_t buffer_size;
+    
+    /* Event type names stored on host side for export */
+    char event_names[SM_PROFILER_MAX_EVENT_TYPES][SM_PROFILER_MAX_EVENT_NAME_LEN];
 };
 
-/* Structure sizes (must match device side) */
-#define EVENT_TYPE_ENTRY_SIZE (SM_PROFILER_MAX_EVENT_NAME_LEN + 8)  /* name + active + padding */
-#define DEVICE_EVENT_SIZE 32  /* sizeof(DeviceEvent) */
+/* Structure sizes (must match device side, defined in sm_profiler.h) */
+#define ACTIVE_EVENT_ENTRY_SIZE 4  /* sizeof(SmProfilerActiveEventEntry) = 4 */
+#define DEVICE_EVENT_SIZE 40       /* sizeof(SmProfilerDeviceEvent) = 40 */
+
+/* Compile-time size checks */
+typedef char static_assert_active_entry_size[(sizeof(SmProfilerActiveEventEntry) == ACTIVE_EVENT_ENTRY_SIZE) ? 1 : -1];
+
+/* Buffer layout offsets (in uint64_t units) - must be consistent across all functions */
+#define HEADER_SIZE_UINT64 2  /* 2 x uint64_t for header */
+
+/* Calculate counters size in uint64_t units */
+static uint32_t get_counters_size_uint64(uint32_t num_blocks, uint32_t num_groups) {
+    size_t counters_bytes = (size_t)num_blocks * num_groups * sizeof(uint32_t);
+    return (uint32_t)((counters_bytes + sizeof(uint64_t) - 1) / sizeof(uint64_t));
+}
+
+/* Calculate offset to active event table (in uint64_t units) */
+static uint32_t get_active_event_offset(uint32_t num_blocks, uint32_t num_groups) {
+    return HEADER_SIZE_UINT64 + get_counters_size_uint64(num_blocks, num_groups);
+}
+
+/* Calculate active table size in uint64_t units */
+static uint32_t get_active_table_size_uint64(uint32_t num_blocks, uint32_t num_groups) {
+    size_t active_bytes = (size_t)num_blocks * num_groups * SM_PROFILER_MAX_EVENT_TYPES * ACTIVE_EVENT_ENTRY_SIZE;
+    return (uint32_t)((active_bytes + sizeof(uint64_t) - 1) / sizeof(uint64_t));
+}
+
+/* Calculate offset to event data (in uint64_t units) */
+static uint32_t get_event_data_offset(uint32_t num_blocks, uint32_t num_groups) {
+    return get_active_event_offset(num_blocks, num_groups) + get_active_table_size_uint64(num_blocks, num_groups);
+}
 
 sm_profiler_buffer_t sm_profiler_create_buffer(
     uint32_t num_blocks,
-    uint32_t max_events_per_block
+    uint32_t num_groups,
+    uint32_t max_events_per_group
 ) {
-    if (num_blocks == 0 || max_events_per_block == 0) {
+    if (num_blocks == 0 || num_groups == 0 || max_events_per_group == 0) {
         fprintf(stderr, "sm_profiler: Invalid parameters\n");
         return NULL;
     }
@@ -35,23 +68,21 @@ sm_profiler_buffer_t sm_profiler_create_buffer(
     }
 
     buffer->num_blocks = num_blocks;
-    buffer->max_events_per_block = max_events_per_block;
+    buffer->num_groups = num_groups;
+    buffer->max_events_per_group = max_events_per_group;
 
-    /* Calculate buffer size:
-     * [0] Header (1 x uint64)
-     * [1 .. num_blocks] Event id counters (uint32 per block, packed in uint64)
-     * Event type table: num_blocks * SM_PROFILER_MAX_EVENT_TYPES * sizeof(EventTypeEntry)
-     * Event data: num_blocks * max_events_per_block * sizeof(DeviceEvent)
-     */
-    size_t header_size = sizeof(uint64_t);
-    size_t counters_size = num_blocks * sizeof(uint32_t);
-    size_t type_table_size = num_blocks * SM_PROFILER_MAX_EVENT_TYPES * EVENT_TYPE_ENTRY_SIZE;
-    size_t event_data_size = num_blocks * max_events_per_block * DEVICE_EVENT_SIZE;
+    /* Initialize event names to empty */
+    for (int i = 0; i < SM_PROFILER_MAX_EVENT_TYPES; i++) {
+        buffer->event_names[i][0] = '\0';
+    }
+
+    /* Calculate buffer size using consistent offset functions */
+    uint32_t event_data_offset_uint64 = get_event_data_offset(num_blocks, num_groups);
+    /* Event data: [num_blocks][num_groups][max_events_per_group] */
+    size_t event_data_size = (size_t)num_blocks * num_groups * max_events_per_group * DEVICE_EVENT_SIZE;
+    size_t event_data_size_uint64 = (event_data_size + sizeof(uint64_t) - 1) / sizeof(uint64_t);
     
-    buffer->buffer_size = header_size + counters_size + type_table_size + event_data_size;
-    
-    /* Round up to uint64 alignment */
-    buffer->buffer_size = (buffer->buffer_size + sizeof(uint64_t) - 1) & ~(sizeof(uint64_t) - 1);
+    buffer->buffer_size = (event_data_offset_uint64 + event_data_size_uint64) * sizeof(uint64_t);
 
     /* Allocate device memory */
     cudaError_t err = cudaMalloc(&buffer->device_ptr, buffer->buffer_size);
@@ -99,71 +130,106 @@ uint64_t* sm_profiler_get_device_ptr(sm_profiler_buffer_t buffer) {
     return buffer->device_ptr;
 }
 
+/*
+ * Initialize buffer on host side (call before kernel launch)
+ * Sets header and clears counters and active event states
+ */
+void sm_profiler_init_buffer(sm_profiler_buffer_t buffer) {
+    if (!buffer) return;
+    
+    /* Write header */
+    /* header0: [num_blocks (32-bit) | num_groups (32-bit)] */
+    /* header1: [max_events_per_group (32-bit) | reserved (32-bit)] */
+    buffer->host_copy[0] = ((uint64_t)buffer->num_blocks << 32) | (uint64_t)buffer->num_groups;
+    buffer->host_copy[1] = ((uint64_t)buffer->max_events_per_group << 32);
+    
+    /* Clear event id counters: [num_blocks * num_groups] */
+    uint32_t* counters = (uint32_t*)(buffer->host_copy + HEADER_SIZE_UINT64);
+    size_t num_counters = (size_t)buffer->num_blocks * buffer->num_groups;
+    for (size_t i = 0; i < num_counters; i++) {
+        counters[i] = 0;
+    }
+    
+    /* Clear active event table */
+    uint32_t active_event_offset = get_active_event_offset(buffer->num_blocks, buffer->num_groups);
+    size_t active_table_size = (size_t)buffer->num_blocks * buffer->num_groups * SM_PROFILER_MAX_EVENT_TYPES * ACTIVE_EVENT_ENTRY_SIZE;
+    char* active_table = (char*)(buffer->host_copy + active_event_offset);
+    memset(active_table, 0, active_table_size);
+    
+    /* Clear event data */
+    uint32_t event_data_offset = get_event_data_offset(buffer->num_blocks, buffer->num_groups);
+    size_t event_data_size = (size_t)buffer->num_blocks * buffer->num_groups * buffer->max_events_per_group * DEVICE_EVENT_SIZE;
+    char* event_data = (char*)(buffer->host_copy + event_data_offset);
+    memset(event_data, 0, event_data_size);
+    
+    /* Copy to device */
+    cudaError_t err = cudaMemcpy(buffer->device_ptr, buffer->host_copy, buffer->buffer_size, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "sm_profiler: cudaMemcpy failed in init_buffer: %s\n", cudaGetErrorString(err));
+    }
+}
+
+/*
+ * Register an event type name (call once during setup)
+ */
+int sm_profiler_register_event(
+    sm_profiler_buffer_t buffer,
+    uint32_t event_no,
+    const char* name
+) {
+    if (!buffer || !name) return -1;
+    if (event_no >= SM_PROFILER_MAX_EVENT_TYPES) {
+        fprintf(stderr, "sm_profiler: event_no %u out of range (max %d)\n", event_no, SM_PROFILER_MAX_EVENT_TYPES);
+        return -1;
+    }
+
+    strncpy(buffer->event_names[event_no], name, SM_PROFILER_MAX_EVENT_NAME_LEN - 1);
+    buffer->event_names[event_no][SM_PROFILER_MAX_EVENT_NAME_LEN - 1] = '\0';
+
+    return 0;
+}
+
 void sm_profiler_get_info(
     sm_profiler_buffer_t buffer,
     uint32_t* out_num_blocks,
+    uint32_t* out_num_groups,
     uint32_t* out_max_events
 ) {
     if (!buffer) return;
     if (out_num_blocks) *out_num_blocks = buffer->num_blocks;
-    if (out_max_events) *out_max_events = buffer->max_events_per_block;
+    if (out_num_groups) *out_num_groups = buffer->num_groups;
+    if (out_max_events) *out_max_events = buffer->max_events_per_group;
 }
 
 /* ============================================================================
  * Export to Chrome Trace JSON format
  * ============================================================================ */
 
-/* Trace event structure (host side) */
-typedef struct {
-    uint32_t event_id;
-    uint32_t event_no;
-    uint32_t block_id;
-    uint32_t sm_id;
-    uint64_t st_timestamp_ns;
-    uint64_t en_timestamp_ns;
-    uint32_t type;  /* 0=range, 1=instant */
-} trace_event_t;
+/* Compile-time size check for SmProfilerDeviceEvent (defined in sm_profiler.h) */
+typedef char static_assert_host_event_size[(sizeof(SmProfilerDeviceEvent) == DEVICE_EVENT_SIZE) ? 1 : -1];
 
-/* Event type entry (host side, packed) */
-typedef struct {
-    char name[SM_PROFILER_MAX_EVENT_NAME_LEN];
-    uint32_t active_event_id;
-    uint32_t padding;
-} host_event_type_entry_t;
-
-/* Device event structure (host side, packed) */
-typedef struct {
-    uint32_t event_id;
-    uint32_t event_no;
-    uint32_t block_id;
-    uint32_t sm_id;
-    uint64_t st_timestamp_ns;
-    uint64_t en_timestamp_ns;
-    uint32_t type;
-    uint32_t reserved;
-} host_device_event_t;
-
-static void* get_event_type_table_ptr(uint64_t* host_copy, uint32_t num_blocks) {
-    char* base = (char*)host_copy;
-    return base + sizeof(uint64_t) + num_blocks * sizeof(uint32_t);
+static void parse_header(uint64_t* host_copy, uint32_t* num_blocks, uint32_t* num_groups, uint32_t* max_events_per_group) {
+    uint64_t header0 = host_copy[0];
+    uint64_t header1 = host_copy[1];
+    *num_blocks = (uint32_t)(header0 >> 32);
+    *num_groups = (uint32_t)(header0 & 0xFFFFFFFF);
+    *max_events_per_group = (uint32_t)(header1 >> 32);
 }
 
-static void* get_event_data_ptr(uint64_t* host_copy, uint32_t num_blocks) {
-    char* base = (char*)host_copy;
-    size_t type_table_size = num_blocks * SM_PROFILER_MAX_EVENT_TYPES * EVENT_TYPE_ENTRY_SIZE;
-    return base + sizeof(uint64_t) + num_blocks * sizeof(uint32_t) + type_table_size;
-}
-
-static host_event_type_entry_t* get_event_type_entry(void* table_ptr, uint32_t block_idx, uint32_t event_no) {
-    char* base = (char*)table_ptr;
-    host_event_type_entry_t* block_table = (host_event_type_entry_t*)(base + block_idx * SM_PROFILER_MAX_EVENT_TYPES * EVENT_TYPE_ENTRY_SIZE);
-    return &block_table[event_no];
-}
-
-static host_device_event_t* get_device_event(void* data_ptr, uint32_t max_events_per_block, 
-                                              uint32_t block_idx, uint32_t event_idx) {
+static SmProfilerDeviceEvent* get_device_event(void* data_ptr, uint32_t num_groups, uint32_t max_events_per_group,
+                                              uint32_t block_idx, uint32_t group_idx, uint32_t event_idx) {
     char* base = (char*)data_ptr;
-    return (host_device_event_t*)(base + (block_idx * max_events_per_block + event_idx) * DEVICE_EVENT_SIZE);
+    size_t group_offset = ((size_t)block_idx * num_groups + group_idx) * max_events_per_group;
+    return (SmProfilerDeviceEvent*)(base + (group_offset + event_idx) * DEVICE_EVENT_SIZE);
+}
+
+/* Comparator for qsort */
+static int compare_events_by_timestamp(const void* a, const void* b) {
+    const SmProfilerDeviceEvent* ea = (const SmProfilerDeviceEvent*)a;
+    const SmProfilerDeviceEvent* eb = (const SmProfilerDeviceEvent*)b;
+    if (ea->st_timestamp_ns < eb->st_timestamp_ns) return -1;
+    if (ea->st_timestamp_ns > eb->st_timestamp_ns) return 1;
+    return 0;
 }
 
 int sm_profiler_export_to_file(
@@ -184,24 +250,24 @@ int sm_profiler_export_to_file(
     }
 
     /* Parse header */
-    uint64_t header = buffer->host_copy[0];
-    uint32_t num_blocks = (uint32_t)(header >> 32);
-    uint32_t max_events_per_block = (uint32_t)(header & 0xFFFFFFFF);
+    uint32_t num_blocks, num_groups, max_events_per_group;
+    parse_header(buffer->host_copy, &num_blocks, &num_groups, &max_events_per_group);
 
-    if (num_blocks == 0 || max_events_per_block == 0) {
+    if (num_blocks == 0 || num_groups == 0 || max_events_per_group == 0) {
         fprintf(stderr, "sm_profiler: Invalid header in buffer\n");
         return -1;
     }
 
-    /* Get pointers to data regions */
-    void* type_table_ptr = get_event_type_table_ptr(buffer->host_copy, num_blocks);
-    void* event_data_ptr = get_event_data_ptr(buffer->host_copy, num_blocks);
+    /* Get pointer to counters and event data */
+    uint32_t* counters = (uint32_t*)(buffer->host_copy + HEADER_SIZE_UINT64);
+    uint32_t event_data_offset = get_event_data_offset(num_blocks, num_groups);
+    void* event_data_ptr = (char*)buffer->host_copy + event_data_offset * sizeof(uint64_t);
 
     /* Count total events */
-    uint32_t* counters = (uint32_t*)(buffer->host_copy + 1);
     size_t total_events = 0;
-    for (uint32_t b = 0; b < num_blocks; b++) {
-        total_events += counters[b];
+    size_t num_counters = (size_t)num_blocks * num_groups;
+    for (size_t i = 0; i < num_counters; i++) {
+        total_events += counters[i];
     }
 
     if (total_events == 0) {
@@ -210,7 +276,7 @@ int sm_profiler_export_to_file(
     }
 
     /* Collect all events */
-    trace_event_t* events = (trace_event_t*)malloc(total_events * sizeof(trace_event_t));
+    SmProfilerDeviceEvent* events = (SmProfilerDeviceEvent*)malloc(total_events * sizeof(SmProfilerDeviceEvent));
     if (!events) {
         fprintf(stderr, "sm_profiler: Failed to allocate events array\n");
         return -1;
@@ -218,33 +284,19 @@ int sm_profiler_export_to_file(
 
     size_t event_count = 0;
     for (uint32_t b = 0; b < num_blocks; b++) {
-        uint32_t block_event_count = counters[b];
-        for (uint32_t e = 0; e < block_event_count; e++) {
-            host_device_event_t* dev_ev = get_device_event(event_data_ptr, max_events_per_block, b, e);
+        for (uint32_t g = 0; g < num_groups; g++) {
+            uint32_t counter_idx = b * num_groups + g;
+            uint32_t group_event_count = counters[counter_idx];
             
-            if (dev_ev->event_id != e) continue;  // Sanity check
-            
-            events[event_count].event_id = dev_ev->event_id;
-            events[event_count].event_no = dev_ev->event_no;
-            events[event_count].block_id = dev_ev->block_id;
-            events[event_count].sm_id = dev_ev->sm_id;
-            events[event_count].st_timestamp_ns = dev_ev->st_timestamp_ns;
-            events[event_count].en_timestamp_ns = dev_ev->en_timestamp_ns;
-            events[event_count].type = dev_ev->type;
-            event_count++;
-        }
-    }
-
-    /* Sort events by start timestamp */
-    for (size_t i = 0; i < event_count; i++) {
-        for (size_t j = i + 1; j < event_count; j++) {
-            if (events[j].st_timestamp_ns < events[i].st_timestamp_ns) {
-                trace_event_t tmp = events[i];
-                events[i] = events[j];
-                events[j] = tmp;
+            for (uint32_t e = 0; e < group_event_count && e < max_events_per_group; e++) {
+                SmProfilerDeviceEvent* dev_ev = get_device_event(event_data_ptr, num_groups, max_events_per_group, b, g, e);
+                events[event_count++] = *dev_ev;
             }
         }
     }
+
+    /* Sort events by start timestamp using qsort (O(n log n) instead of O(n²)) */
+    qsort(events, event_count, sizeof(SmProfilerDeviceEvent), compare_events_by_timestamp);
 
     /* Find min timestamp for relative time calculation */
     uint64_t min_timestamp = event_count > 0 ? events[0].st_timestamp_ns : 0;
@@ -262,74 +314,56 @@ int sm_profiler_export_to_file(
     fprintf(fp, "  \"traceEvents\": [\n");
 
     size_t output_count = 0;
+    int first_entry = 1;
+    
     for (size_t i = 0; i < event_count; i++) {
-        trace_event_t* ev = &events[i];
+        SmProfilerDeviceEvent* ev = &events[i];
         
-        /* Get event name from event type table */
-        host_event_type_entry_t* type_entry = get_event_type_entry(type_table_ptr, ev->block_id, ev->event_no);
-        char event_name[SM_PROFILER_MAX_EVENT_NAME_LEN];
-        if (type_entry->name[0] != '\0') {
-            strncpy(event_name, type_entry->name, SM_PROFILER_MAX_EVENT_NAME_LEN - 1);
-            event_name[SM_PROFILER_MAX_EVENT_NAME_LEN - 1] = '\0';
-        } else {
-            snprintf(event_name, sizeof(event_name), "event_%u", ev->event_no);
+        /* Get event name from host-side registered names */
+        const char* event_name = buffer->event_names[ev->event_no];
+        if (event_name[0] == '\0') {
+            event_name = "unknown";
         }
-
-        /* Caption = event_name + "_" + event_id */
-        char caption[SM_PROFILER_MAX_EVENT_NAME_LEN + 16];
-        snprintf(caption, sizeof(caption), "%s_%u", event_name, ev->event_id);
 
         /* Calculate relative timestamp in microseconds (Chrome trace format uses us) */
         double ts_us = (double)(ev->st_timestamp_ns - min_timestamp) / 1000.0;
 
-        /* Output format:
-         * - Range: Output B and E events
-         * - Instant: Output i event
-         * pid = sm_id, tid = block_id
-         */
+        /* Generate thread name */
+        char tid_str[64];
+        snprintf(tid_str, sizeof(tid_str), "block_%u_group_%u", ev->block_id, ev->group_idx);
         
         if (ev->type == 0) {
             /* Range event - Begin */
-            fprintf(fp, "    {\n");
-            fprintf(fp, "      \"name\": \"%s\",\n", caption);
-            fprintf(fp, "      \"ph\": \"B\",\n");
-            fprintf(fp, "      \"ts\": %.3f,\n", ts_us);
-            fprintf(fp, "      \"pid\": %u,\n", ev->sm_id);
-            fprintf(fp, "      \"tid\": %u,\n", ev->block_id);
-            fprintf(fp, "      \"cat\": \"gpu\"\n");
-            fprintf(fp, "    },\n");
+            if (!first_entry) fprintf(fp, ",\n");
+            first_entry = 0;
+            
+            fprintf(fp, "    {\"name\": \"%s\", \"ph\": \"B\", \"ts\": %.3f, \"pid\": %u, \"tid\": \"%s\", \"cat\": \"gpu\"}",
+                    event_name, ts_us, ev->sm_id, tid_str);
             output_count++;
             
             /* Range event - End */
             double end_ts_us = (double)(ev->en_timestamp_ns - min_timestamp) / 1000.0;
-            fprintf(fp, "    {\n");
-            fprintf(fp, "      \"name\": \"%s\",\n", caption);
-            fprintf(fp, "      \"ph\": \"E\",\n");
-            fprintf(fp, "      \"ts\": %.3f,\n", end_ts_us);
-            fprintf(fp, "      \"pid\": %u,\n", ev->sm_id);
-            fprintf(fp, "      \"tid\": %u,\n", ev->block_id);
-            fprintf(fp, "      \"cat\": \"gpu\"\n");
-            fprintf(fp, "    }%s\n", (i < event_count - 1 || output_count < total_events * 2 - 1) ? "," : "");
+            fprintf(fp, ",\n");
+            fprintf(fp, "    {\"name\": \"%s\", \"ph\": \"E\", \"ts\": %.3f, \"pid\": %u, \"tid\": \"%s\", \"cat\": \"gpu\"}",
+                    event_name, end_ts_us, ev->sm_id, tid_str);
             output_count++;
         } else {
             /* Instant event */
-            fprintf(fp, "    {\n");
-            fprintf(fp, "      \"name\": \"%s\",\n", caption);
-            fprintf(fp, "      \"ph\": \"i\",\n");
-            fprintf(fp, "      \"ts\": %.3f,\n", ts_us);
-            fprintf(fp, "      \"pid\": %u,\n", ev->sm_id);
-            fprintf(fp, "      \"tid\": %u,\n", ev->block_id);
-            fprintf(fp, "      \"cat\": \"gpu\"\n");
-            fprintf(fp, "    }%s\n", (i < event_count - 1) ? "," : "");
+            if (!first_entry) fprintf(fp, ",\n");
+            first_entry = 0;
+            
+            fprintf(fp, "    {\"name\": \"%s\", \"ph\": \"i\", \"ts\": %.3f, \"pid\": %u, \"tid\": \"%s\", \"cat\": \"gpu\", \"s\": \"t\"}",
+                    event_name, ts_us, ev->sm_id, tid_str);
             output_count++;
         }
     }
 
-    fprintf(fp, "  ],\n");
+    fprintf(fp, "\n  ],\n");
     fprintf(fp, "  \"displayTimeUnit\": \"ns\",\n");
     fprintf(fp, "  \"metadata\": {\n");
     fprintf(fp, "    \"num_blocks\": %u,\n", num_blocks);
-    fprintf(fp, "    \"max_events_per_block\": %u,\n", max_events_per_block);
+    fprintf(fp, "    \"num_groups\": %u,\n", num_groups);
+    fprintf(fp, "    \"max_events_per_group\": %u,\n", max_events_per_group);
     fprintf(fp, "    \"total_events\": %zu\n", event_count);
     fprintf(fp, "  }\n");
     fprintf(fp, "}\n");

@@ -1,7 +1,7 @@
 # SM Profiler Library Makefile
 
 NVCC = nvcc
-NVCC_FLAGS = -O2 -arch=sm_80 -std=c++14
+NVCC_FLAGS = -O3 -gencode=arch=compute_90a,code=sm_90a -std=c++14
 
 # Library objects
 LIB_OBJS = sm_profiler.o
