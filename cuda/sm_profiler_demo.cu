@@ -75,7 +75,7 @@ int main() {
     /* Create profiler buffer */
     printf("\nCreating profiler buffer...\n");
     sm_profiler_buffer_t profiler = sm_profiler_create_buffer(
-        num_blocks, 
+        num_blocks,
         num_warps,
         max_events_per_group
     );
