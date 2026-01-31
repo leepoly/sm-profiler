@@ -20,6 +20,7 @@ Usage:
 from .profiler import SmProfiler
 from .triton_ops import (
     profiler_parse_buffer,
+    profiler_init,
     profiler_event_start,
     profiler_event_end,
     profiler_event_instant,
@@ -29,6 +30,7 @@ __version__ = "0.1.0"
 __all__ = [
     "SmProfiler",
     "profiler_parse_buffer",
+    "profiler_init",
     "profiler_event_start",
     "profiler_event_end",
     "profiler_event_instant",

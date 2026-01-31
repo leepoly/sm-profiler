@@ -9,6 +9,7 @@ import triton.language as tl
 
 __all__ = [
     "profiler_parse_buffer",
+    "profiler_init",
     "profiler_event_start",
     "profiler_event_end",
     "profiler_event_instant",
@@ -163,12 +164,12 @@ def _store_event(ev_ptr, event_id, event_no, block_idx, group_idx, sm_id, event_
 
 
 @triton.jit
-def profiler_event_start(
+def _profiler_event_start_impl(
     counters_ptr, active_ptr, events_ptr,
     num_groups, max_events,
     block_idx, group_idx, event_no
 ):
-    """Start a range event."""
+    """Internal implementation: Start a range event."""
     # Check if already active
     active_event_id = _get_active_entry(active_ptr, num_groups, block_idx, group_idx, event_no)
     if active_event_id != 0:
@@ -197,12 +198,12 @@ def profiler_event_start(
 
 
 @triton.jit
-def profiler_event_end(
+def _profiler_event_end_impl(
     active_ptr, events_ptr,
     num_groups, max_events,
     block_idx, group_idx, event_no
 ):
-    """End a range event."""
+    """Internal implementation: End a range event."""
     # Check if active
     active_event_id = _get_active_entry(active_ptr, num_groups, block_idx, group_idx, event_no)
     if active_event_id == 0:
@@ -222,12 +223,12 @@ def profiler_event_end(
 
 
 @triton.jit
-def profiler_event_instant(
+def _profiler_event_instant_impl(
     counters_ptr, active_ptr, events_ptr,
     num_groups, max_events,
     block_idx, group_idx, event_no
 ):
-    """Record an instant event."""
+    """Internal implementation: Record an instant event."""
     # Get and increment counter
     event_id = _get_counter(counters_ptr, num_groups, block_idx, group_idx)
     _set_counter(counters_ptr, num_groups, block_idx, group_idx, event_id + 1)
@@ -245,3 +246,67 @@ def profiler_event_instant(
     
     # Write event - type=1 for instant
     _store_event(ev_ptr, event_id, event_no, block_idx, group_idx, sm_id, 1, timestamp)
+
+@triton.jit
+def profiler_init(buffer_ptr):
+    """
+    Initialize profiler context. Call once at kernel start.
+    Returns a tuple (counters_ptr, active_ptr, events_ptr, num_groups, max_events).
+    
+    Usage:
+        ctx = profiler_init(buffer_ptr)
+        profiler_event_start(ctx, block_idx, group_idx, event_no)
+    """
+    num_blocks, num_groups, max_events, counters_ptr, active_ptr, events_ptr = \
+        profiler_parse_buffer(buffer_ptr)
+    return counters_ptr, active_ptr, events_ptr, num_groups, max_events
+
+
+@triton.jit
+def profiler_event_start(ctx, block_idx, group_idx, event_no):
+    """
+    Start a range event using context tuple.
+    
+    Args:
+        ctx: Context tuple from profiler_init()
+        block_idx: Block index (usually tl.program_id(0))
+        group_idx: Group index (usually 0 or warp_id)
+        event_no: Event type number
+    """
+    counters_ptr, active_ptr, events_ptr, num_groups, max_events = ctx
+    _profiler_event_start_impl(counters_ptr, active_ptr, events_ptr,
+                              num_groups, max_events, block_idx, group_idx, event_no)
+
+
+@triton.jit
+def profiler_event_end(ctx, block_idx, group_idx, event_no):
+    """
+    End a range event using context tuple.
+    
+    Args:
+        ctx: Context tuple from profiler_init()
+        block_idx: Block index (usually tl.program_id(0))
+        group_idx: Group index (usually 0 or warp_id)
+        event_no: Event type number
+    """
+    counters_ptr, active_ptr, events_ptr, num_groups, max_events = ctx
+    _profiler_event_end_impl(active_ptr, events_ptr,
+                            num_groups, max_events, block_idx, group_idx, event_no)
+
+
+@triton.jit
+def profiler_event_instant(ctx, block_idx, group_idx, event_no):
+    """
+    Record an instant event using context tuple.
+    
+    Args:
+        ctx: Context tuple from profiler_init()
+        block_idx: Block index (usually tl.program_id(0))
+        group_idx: Group index (usually 0 or warp_id)
+        event_no: Event type number
+    """
+    counters_ptr, active_ptr, events_ptr, num_groups, max_events = ctx
+    _profiler_event_instant_impl(counters_ptr, active_ptr, events_ptr,
+                                num_groups, max_events, block_idx, group_idx, event_no)
+
+

@@ -10,7 +10,7 @@ import triton.language as tl
 
 from sm_profiler import SmProfiler
 from sm_profiler.triton_ops import (
-    profiler_parse_buffer,
+    profiler_init,
     profiler_event_start,
     profiler_event_end,
     profiler_event_instant,
@@ -34,9 +34,8 @@ def demo_kernel(
     NUM_GROUPS: tl.constexpr,
 ):
     """Demo kernel with profiling."""
-    # Parse profiler buffer once at start
-    num_blocks, num_groups, max_events, counters_ptr, active_ptr, events_ptr = \
-        profiler_parse_buffer(profiler_buffer_ptr)
+    # Initialize profiler context once at start
+    ctx = profiler_init(profiler_buffer_ptr)
     
     # Get block ID
     block_idx = tl.program_id(0)
@@ -45,9 +44,8 @@ def demo_kernel(
     # In a real kernel with multiple warps, you'd compute group_idx differently
     group_idx = 0
     
-    # --- Compute phase ---
-    profiler_event_start(counters_ptr, active_ptr, events_ptr,
-                        num_groups, max_events, block_idx, group_idx, TL_EVT_COMPUTE)
+    # --- Compute phase (using start/end) ---
+    profiler_event_start(ctx, block_idx, group_idx, TL_EVT_COMPUTE)
     
     # Simulate computation
     offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -58,21 +56,15 @@ def demo_kernel(
     for _ in range(10):
         x = x * 1.01 + 0.001
     
-    profiler_event_end(active_ptr, events_ptr,
-                      num_groups, max_events, block_idx, group_idx, TL_EVT_COMPUTE)
+    profiler_event_end(ctx, block_idx, group_idx, TL_EVT_COMPUTE)
     
     # --- Memory phase ---
-    profiler_event_start(counters_ptr, active_ptr, events_ptr,
-                        num_groups, max_events, block_idx, group_idx, TL_EVT_MEMORY)
-    
+    profiler_event_start(ctx, block_idx, group_idx, TL_EVT_MEMORY)
     tl.store(output_ptr + offsets, x, mask=mask)
-    
-    profiler_event_end(active_ptr, events_ptr,
-                      num_groups, max_events, block_idx, group_idx, TL_EVT_MEMORY)
+    profiler_event_end(ctx, block_idx, group_idx, TL_EVT_MEMORY)
     
     # --- Sync point (instant event) ---
-    profiler_event_instant(counters_ptr, active_ptr, events_ptr,
-                          num_groups, max_events, block_idx, group_idx, TL_EVT_SYNC)
+    profiler_event_instant(ctx, block_idx, group_idx, TL_EVT_SYNC)
 
 
 def main():
