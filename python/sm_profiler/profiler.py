@@ -225,7 +225,7 @@ class SmProfiler:
             if ev.event_type == 0:  # Range event
                 # Begin
                 trace_events.append({
-                    "name": event_name,
+                    "name": f"{event_name}_{ev.event_id}",
                     "ph": "B",
                     "ts": ts_us,
                     "pid": ev.sm_id,
@@ -235,7 +235,7 @@ class SmProfiler:
                 # End
                 end_ts_us = (ev.en_timestamp_ns - min_ts) / 1000.0
                 trace_events.append({
-                    "name": event_name,
+                    "name": f"{event_name}_{ev.event_id}",
                     "ph": "E",
                     "ts": end_ts_us,
                     "pid": ev.sm_id,
@@ -244,7 +244,7 @@ class SmProfiler:
                 })
             else:  # Instant event
                 trace_events.append({
-                    "name": event_name,
+                    "name": f"{event_name}_{ev.event_id}",
                     "ph": "i",
                     "ts": ts_us,
                     "pid": ev.sm_id,
