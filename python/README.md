@@ -36,32 +36,39 @@ buffer = profiler.get_buffer()
 import triton
 import triton.language as tl
 from sm_profiler.triton_ops import (
-    profiler_parse_buffer,
+    profiler_init,
     profiler_event_start,
     profiler_event_end,
     profiler_event_instant,
 )
 
+# Define event type constants (both regular and tl.constexpr versions)
 EVT_COMPUTE = 0
 EVT_MEMORY = 1
+TL_EVT_COMPUTE = tl.constexpr(0)
+TL_EVT_MEMORY = tl.constexpr(1)
 
 @triton.jit
-def my_kernel(profiler_buffer_ptr, ...):
-    # Parse buffer once at kernel start
-    num_blocks, num_groups, max_events, counters_ptr, active_ptr, events_ptr = \
-        profiler_parse_buffer(profiler_buffer_ptr)
+def my_kernel(
+    profiler_buffer_ptr,
+    ...,
+    NUM_GROUPS: tl.constexpr,
+):
+    # Initialize profiler context once at kernel start
+    ctx = profiler_init(profiler_buffer_ptr)
     
     block_idx = tl.program_id(0)
     group_idx = 0  # or compute based on your kernel structure
     
-    # Record events
-    profiler_event_start(counters_ptr, active_ptr, events_ptr,
-                        num_groups, max_events, block_idx, group_idx, EVT_COMPUTE)
+    # Record range events (start/end)
+    profiler_event_start(ctx, block_idx, group_idx, TL_EVT_COMPUTE)
     
     # ... your computation ...
     
-    profiler_event_end(active_ptr, events_ptr,
-                      num_groups, max_events, block_idx, group_idx, EVT_COMPUTE)
+    profiler_event_end(ctx, block_idx, group_idx, TL_EVT_COMPUTE)
+    
+    # Record instant events
+    profiler_event_instant(ctx, block_idx, group_idx, TL_EVT_SYNC)
 ```
 
 ### 3. Export Trace (Host Side)
@@ -96,12 +103,20 @@ Open `trace.json` in:
 
 ```python
 from sm_profiler.triton_ops import (
-    profiler_parse_buffer,      # Parse buffer header
+    profiler_init,              # Initialize profiler context
     profiler_event_start,       # Start range event
     profiler_event_end,         # End range event
     profiler_event_instant,     # Record instant event
 )
 ```
+
+**Usage:**
+- `ctx = profiler_init(profiler_buffer_ptr)` - Initialize once at kernel start, returns context object
+- `profiler_event_start(ctx, block_idx, group_idx, event_type)` - Start a range event
+- `profiler_event_end(ctx, block_idx, group_idx, event_type)` - End a range event
+- `profiler_event_instant(ctx, block_idx, group_idx, event_type)` - Record an instant event
+
+**Note:** Event types should be `tl.constexpr` values when used in kernels (e.g., `TL_EVT_COMPUTE = tl.constexpr(0)`).
 
 ## Demo
 
