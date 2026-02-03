@@ -136,6 +136,7 @@ class SmProfiler:
             event_no: Event type ID (0 to SM_PROFILER_MAX_EVENT_TYPES-1)
             name: Human-readable name for this event type
         """
+        event_no = int(event_no)
         if event_no < 0 or event_no >= SM_PROFILER_MAX_EVENT_TYPES:
             raise ValueError(f"event_no must be 0-{SM_PROFILER_MAX_EVENT_TYPES-1}")
         self.event_names[event_no] = name

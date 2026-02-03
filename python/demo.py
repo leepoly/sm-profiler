@@ -17,12 +17,9 @@ from sm_profiler.triton_ops import (
 )
 
 # Event type constants
-EVT_COMPUTE = 0
-EVT_MEMORY = 1
-EVT_SYNC = 2
-TL_EVT_COMPUTE = tl.constexpr(0)
-TL_EVT_MEMORY = tl.constexpr(1)
-TL_EVT_SYNC = tl.constexpr(2)
+EVT_COMPUTE = tl.constexpr(0)
+EVT_MEMORY = tl.constexpr(1)
+EVT_SYNC = tl.constexpr(2)
 
 
 @triton.jit
@@ -45,7 +42,7 @@ def demo_kernel(
     group_idx = 0
     
     # --- Compute phase (using start/end) ---
-    profiler_event_start(ctx, block_idx, group_idx, TL_EVT_COMPUTE)
+    profiler_event_start(ctx, block_idx, group_idx, EVT_COMPUTE)
     
     # Simulate computation
     offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -56,15 +53,15 @@ def demo_kernel(
     for _ in range(10):
         x = x * 1.01 + 0.001
     
-    profiler_event_end(ctx, block_idx, group_idx, TL_EVT_COMPUTE)
+    profiler_event_end(ctx, block_idx, group_idx, EVT_COMPUTE)
     
     # --- Memory phase ---
-    profiler_event_start(ctx, block_idx, group_idx, TL_EVT_MEMORY)
+    profiler_event_start(ctx, block_idx, group_idx, EVT_MEMORY)
     tl.store(output_ptr + offsets, x, mask=mask)
-    profiler_event_end(ctx, block_idx, group_idx, TL_EVT_MEMORY)
+    profiler_event_end(ctx, block_idx, group_idx, EVT_MEMORY)
     
     # --- Sync point (instant event) ---
-    profiler_event_instant(ctx, block_idx, group_idx, TL_EVT_SYNC)
+    profiler_event_instant(ctx, block_idx, group_idx, EVT_SYNC)
 
 
 def run_demo():
