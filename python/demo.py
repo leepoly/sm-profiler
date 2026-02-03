@@ -67,14 +67,8 @@ def demo_kernel(
     profiler_event_instant(ctx, block_idx, group_idx, TL_EVT_SYNC)
 
 
-def main():
-    # Check CUDA
-    if not torch.cuda.is_available():
-        print("CUDA not available!")
-        return
-    
-    print(f"GPU: {torch.cuda.get_device_name()}")
-    print()
+def run_demo():
+    """Run demo with specified enabled state."""
     
     # Configuration
     n_elements = 4096
@@ -96,7 +90,8 @@ def main():
     profiler = SmProfiler(
         num_blocks=num_blocks,
         num_groups=num_groups,
-        max_events_per_group=max_events_per_group
+        max_events_per_group=max_events_per_group,
+        enabled=True,
     )
     
     # Register event types
@@ -131,7 +126,18 @@ def main():
     
     # Export trace
     profiler.export("triton_profile.json")
+
+
+def main():
+    # Check CUDA
+    if not torch.cuda.is_available():
+        print("CUDA not available!")
+        return
+    
+    print(f"GPU: {torch.cuda.get_device_name()}")
     print()
+    
+    run_demo()
     print("To view: Open triton_profile.json in Chrome chrome://tracing or https://ui.perfetto.dev/")
 
 

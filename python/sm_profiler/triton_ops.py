@@ -247,19 +247,25 @@ def _profiler_event_instant_impl(
     # Write event - type=1 for instant
     _store_event(ev_ptr, event_id, event_no, block_idx, group_idx, sm_id, 1, timestamp)
 
+
 @triton.jit
 def profiler_init(buffer_ptr):
     """
     Initialize profiler context. Call once at kernel start.
-    Returns a tuple (counters_ptr, active_ptr, events_ptr, num_groups, max_events).
+    Returns a tuple (counters_ptr, active_ptr, events_ptr, num_groups, max_events, enabled).
     
     Usage:
         ctx = profiler_init(buffer_ptr)
-        profiler_event_start(ctx, block_idx, group_idx, event_no)
+        if ctx[5]:  # check enabled
+            profiler_event_start(ctx, block_idx, group_idx, event_no)
     """
-    num_blocks, num_groups, max_events, counters_ptr, active_ptr, events_ptr = \
+    header1 = tl.load(buffer_ptr + 1)
+    enabled = header1 & 0x7FFFFFFF
+    
+    num_blocks, num_groups, max_events_per_group, counters_ptr, active_ptr, events_ptr = \
         profiler_parse_buffer(buffer_ptr)
-    return counters_ptr, active_ptr, events_ptr, num_groups, max_events
+    
+    return counters_ptr, active_ptr, events_ptr, num_groups, max_events_per_group, enabled
 
 
 @triton.jit
@@ -273,7 +279,9 @@ def profiler_event_start(ctx, block_idx, group_idx, event_no):
         group_idx: Group index (usually 0 or warp_id)
         event_no: Event type number
     """
-    counters_ptr, active_ptr, events_ptr, num_groups, max_events = ctx
+    counters_ptr, active_ptr, events_ptr, num_groups, max_events, enabled = ctx
+    if enabled == 0:
+        return
     _profiler_event_start_impl(counters_ptr, active_ptr, events_ptr,
                               num_groups, max_events, block_idx, group_idx, event_no)
 
@@ -289,7 +297,9 @@ def profiler_event_end(ctx, block_idx, group_idx, event_no):
         group_idx: Group index (usually 0 or warp_id)
         event_no: Event type number
     """
-    counters_ptr, active_ptr, events_ptr, num_groups, max_events = ctx
+    counters_ptr, active_ptr, events_ptr, num_groups, max_events, enabled = ctx
+    if enabled == 0:
+        return
     _profiler_event_end_impl(active_ptr, events_ptr,
                             num_groups, max_events, block_idx, group_idx, event_no)
 
@@ -305,8 +315,8 @@ def profiler_event_instant(ctx, block_idx, group_idx, event_no):
         group_idx: Group index (usually 0 or warp_id)
         event_no: Event type number
     """
-    counters_ptr, active_ptr, events_ptr, num_groups, max_events = ctx
+    counters_ptr, active_ptr, events_ptr, num_groups, max_events, enabled = ctx
+    if enabled == 0:
+        return
     _profiler_event_instant_impl(counters_ptr, active_ptr, events_ptr,
                                 num_groups, max_events, block_idx, group_idx, event_no)
-
-

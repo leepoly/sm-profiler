@@ -47,7 +47,8 @@ class SmProfiler:
         num_blocks: int,
         num_groups: int,
         max_events_per_group: int,
-        device: str = "cuda"
+        device: str = "cuda",
+        enabled: bool = True
     ):
         """
         Create a profiler buffer.
@@ -57,10 +58,12 @@ class SmProfiler:
             num_groups: Number of groups (warps) per block
             max_events_per_group: Maximum events per group (warp)
             device: PyTorch device (default: "cuda")
+            enabled: Whether profiling is enabled (default: True)
         """
         if num_blocks <= 0 or num_groups <= 0 or max_events_per_group <= 0:
             raise ValueError("All parameters must be positive")
         
+        self.enabled = enabled
         self.num_blocks = num_blocks
         self.num_groups = num_groups
         self.max_events_per_group = max_events_per_group
@@ -80,6 +83,11 @@ class SmProfiler:
     
     def _calc_layout(self):
         """Calculate buffer layout offsets."""
+        if not self.enabled:
+            # Minimal buffer when disabled: just header
+            self._total_size_uint64 = HEADER_SIZE_UINT64
+            return
+        
         # Counters: uint32_t[num_blocks * num_groups]
         counters_bytes = self.num_blocks * self.num_groups * 4
         self._counters_size_uint64 = (counters_bytes + 7) // 8
@@ -112,9 +120,10 @@ class SmProfiler:
         
         # Write header
         # header0: [num_blocks (32-bit) | num_groups (32-bit)]
-        # header1: [max_events_per_group (32-bit) | reserved (32-bit)]
+        # header1: [max_events_per_group (32-bit) | enabled (32-bit)]
         header0 = (self.num_blocks << 32) | self.num_groups
-        header1 = (self.max_events_per_group << 32)
+        enabled_flag = 1 if self.enabled else 0
+        header1 = (self.max_events_per_group << 32) | enabled_flag
         
         self._buffer[0] = header0
         self._buffer[1] = header1
@@ -141,6 +150,9 @@ class SmProfiler:
     
     def _parse_events(self) -> List[ProfilerEvent]:
         """Parse events from device buffer."""
+        if not self.enabled:
+            return []
+        
         # Copy to CPU
         buffer_cpu = self._buffer.cpu()
         buffer_bytes = buffer_cpu.numpy().view('uint8')
