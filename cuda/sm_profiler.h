@@ -32,7 +32,8 @@ typedef struct sm_profiler_buffer* sm_profiler_buffer_t;
 sm_profiler_buffer_t sm_profiler_create_buffer(
     uint32_t num_blocks,
     uint32_t num_groups,
-    uint32_t max_events_per_group
+    uint32_t max_events_per_group,
+    int enabled
 );
 
 /*
@@ -157,6 +158,7 @@ struct __SmProfilerBufferInfo {
     uint32_t num_blocks;
     uint32_t num_groups;
     uint32_t max_events_per_group;
+    uint32_t enabled;
     uint32_t* counters;
     char* active_table_base;
     char* event_data_base;
@@ -171,6 +173,7 @@ __device__ __forceinline__ __SmProfilerBufferInfo __sm_profiler_parse_buffer(uin
     info.num_blocks = (uint32_t)(header0 >> 32);
     info.num_groups = (uint32_t)(header0 & 0xFFFFFFFF);
     info.max_events_per_group = (uint32_t)(header1 >> 32);
+    info.enabled = (uint32_t)(header1 & 0xFFFFFFFF);
     
     /* Counters start after header */
     info.counters = (uint32_t*)(buffer + 2);
@@ -216,6 +219,7 @@ __device__ __forceinline__ void sm_profiler_event_start(
     if (event_no >= SM_PROFILER_MAX_EVENT_TYPES) return;
     
     __SmProfilerBufferInfo info = __sm_profiler_parse_buffer(buffer);
+    if (!info.enabled) return;
     
     uint32_t block_idx = sm_profiler_get_block_idx();
     uint32_t group_idx = sm_profiler_get_warp_id();
@@ -258,6 +262,7 @@ __device__ __forceinline__ void sm_profiler_event_end(
     if (event_no >= SM_PROFILER_MAX_EVENT_TYPES) return;
     
     __SmProfilerBufferInfo info = __sm_profiler_parse_buffer(buffer);
+    if (!info.enabled) return;
     
     uint32_t block_idx = sm_profiler_get_block_idx();
     uint32_t group_idx = sm_profiler_get_warp_id();
@@ -287,6 +292,7 @@ __device__ __forceinline__ void sm_profiler_event_instant(
     if (event_no >= SM_PROFILER_MAX_EVENT_TYPES) return;
     
     __SmProfilerBufferInfo info = __sm_profiler_parse_buffer(buffer);
+    if (!info.enabled) return;
     
     uint32_t block_idx = sm_profiler_get_block_idx();
     uint32_t group_idx = sm_profiler_get_warp_id();

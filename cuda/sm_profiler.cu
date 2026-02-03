@@ -11,6 +11,7 @@ struct sm_profiler_buffer {
     uint32_t num_blocks;
     uint32_t num_groups;
     uint32_t max_events_per_group;
+    int enabled;
     uint64_t* device_ptr;
     uint64_t* host_copy;
     size_t buffer_size;
@@ -54,7 +55,8 @@ static uint32_t get_event_data_offset(uint32_t num_blocks, uint32_t num_groups) 
 sm_profiler_buffer_t sm_profiler_create_buffer(
     uint32_t num_blocks,
     uint32_t num_groups,
-    uint32_t max_events_per_group
+    uint32_t max_events_per_group,
+    int enabled
 ) {
     if (num_blocks == 0 || num_groups == 0 || max_events_per_group == 0) {
         fprintf(stderr, "sm_profiler: Invalid parameters\n");
@@ -70,19 +72,24 @@ sm_profiler_buffer_t sm_profiler_create_buffer(
     buffer->num_blocks = num_blocks;
     buffer->num_groups = num_groups;
     buffer->max_events_per_group = max_events_per_group;
+    buffer->enabled = enabled;
 
     /* Initialize event names to empty */
     for (int i = 0; i < SM_PROFILER_MAX_EVENT_TYPES; i++) {
         buffer->event_names[i][0] = '\0';
     }
 
-    /* Calculate buffer size using consistent offset functions */
-    uint32_t event_data_offset_uint64 = get_event_data_offset(num_blocks, num_groups);
-    /* Event data: [num_blocks][num_groups][max_events_per_group] */
-    size_t event_data_size = (size_t)num_blocks * num_groups * max_events_per_group * DEVICE_EVENT_SIZE;
-    size_t event_data_size_uint64 = (event_data_size + sizeof(uint64_t) - 1) / sizeof(uint64_t);
-    
-    buffer->buffer_size = (event_data_offset_uint64 + event_data_size_uint64) * sizeof(uint64_t);
+    /* Calculate buffer size */
+    if (enabled) {
+        uint32_t event_data_offset_uint64 = get_event_data_offset(num_blocks, num_groups);
+        /* Event data: [num_blocks][num_groups][max_events_per_group] */
+        size_t event_data_size = (size_t)num_blocks * num_groups * max_events_per_group * DEVICE_EVENT_SIZE;
+        size_t event_data_size_uint64 = (event_data_size + sizeof(uint64_t) - 1) / sizeof(uint64_t);
+        buffer->buffer_size = (event_data_offset_uint64 + event_data_size_uint64) * sizeof(uint64_t);
+    } else {
+        /* Minimal buffer when disabled: just header */
+        buffer->buffer_size = HEADER_SIZE_UINT64 * sizeof(uint64_t);
+    }
 
     /* Allocate device memory */
     cudaError_t err = cudaMalloc(&buffer->device_ptr, buffer->buffer_size);
@@ -139,28 +146,30 @@ void sm_profiler_init_buffer(sm_profiler_buffer_t buffer) {
     
     /* Write header */
     /* header0: [num_blocks (32-bit) | num_groups (32-bit)] */
-    /* header1: [max_events_per_group (32-bit) | reserved (32-bit)] */
+    /* header1: [max_events_per_group (32-bit) | enabled (32-bit)] */
     buffer->host_copy[0] = ((uint64_t)buffer->num_blocks << 32) | (uint64_t)buffer->num_groups;
-    buffer->host_copy[1] = ((uint64_t)buffer->max_events_per_group << 32);
+    buffer->host_copy[1] = ((uint64_t)buffer->max_events_per_group << 32) | (uint64_t)(buffer->enabled ? 1 : 0);
     
-    /* Clear event id counters: [num_blocks * num_groups] */
-    uint32_t* counters = (uint32_t*)(buffer->host_copy + HEADER_SIZE_UINT64);
-    size_t num_counters = (size_t)buffer->num_blocks * buffer->num_groups;
-    for (size_t i = 0; i < num_counters; i++) {
-        counters[i] = 0;
+    if (buffer->enabled) {
+        /* Clear event id counters: [num_blocks * num_groups] */
+        uint32_t* counters = (uint32_t*)(buffer->host_copy + HEADER_SIZE_UINT64);
+        size_t num_counters = (size_t)buffer->num_blocks * buffer->num_groups;
+        for (size_t i = 0; i < num_counters; i++) {
+            counters[i] = 0;
+        }
+        
+        /* Clear active event table */
+        uint32_t active_event_offset = get_active_event_offset(buffer->num_blocks, buffer->num_groups);
+        size_t active_table_size = (size_t)buffer->num_blocks * buffer->num_groups * SM_PROFILER_MAX_EVENT_TYPES * ACTIVE_EVENT_ENTRY_SIZE;
+        char* active_table = (char*)(buffer->host_copy + active_event_offset);
+        memset(active_table, 0, active_table_size);
+        
+        /* Clear event data */
+        uint32_t event_data_offset = get_event_data_offset(buffer->num_blocks, buffer->num_groups);
+        size_t event_data_size = (size_t)buffer->num_blocks * buffer->num_groups * buffer->max_events_per_group * DEVICE_EVENT_SIZE;
+        char* event_data = (char*)(buffer->host_copy + event_data_offset);
+        memset(event_data, 0, event_data_size);
     }
-    
-    /* Clear active event table */
-    uint32_t active_event_offset = get_active_event_offset(buffer->num_blocks, buffer->num_groups);
-    size_t active_table_size = (size_t)buffer->num_blocks * buffer->num_groups * SM_PROFILER_MAX_EVENT_TYPES * ACTIVE_EVENT_ENTRY_SIZE;
-    char* active_table = (char*)(buffer->host_copy + active_event_offset);
-    memset(active_table, 0, active_table_size);
-    
-    /* Clear event data */
-    uint32_t event_data_offset = get_event_data_offset(buffer->num_blocks, buffer->num_groups);
-    size_t event_data_size = (size_t)buffer->num_blocks * buffer->num_groups * buffer->max_events_per_group * DEVICE_EVENT_SIZE;
-    char* event_data = (char*)(buffer->host_copy + event_data_offset);
-    memset(event_data, 0, event_data_size);
     
     /* Copy to device */
     cudaError_t err = cudaMemcpy(buffer->device_ptr, buffer->host_copy, buffer->buffer_size, cudaMemcpyHostToDevice);
@@ -255,6 +264,11 @@ int sm_profiler_export_to_file(
 
     if (num_blocks == 0 || num_groups == 0 || max_events_per_group == 0) {
         fprintf(stderr, "sm_profiler: Invalid header in buffer\n");
+        return -1;
+    }
+
+    if (!buffer->enabled) {
+        fprintf(stderr, "sm_profiler: Profiling is disabled, no events to export\n");
         return -1;
     }
 

@@ -72,12 +72,13 @@ int main() {
     printf("  Warps per block (groups): %d\n", num_warps);
     printf("  Max events per group: %d\n", max_events_per_group);
     
-    /* Create profiler buffer */
-    printf("\nCreating profiler buffer...\n");
+    /* Create profiler buffer (enabled=1) */
+    printf("\nCreating profiler buffer (enabled=1)...\n");
     sm_profiler_buffer_t profiler = sm_profiler_create_buffer(
         num_blocks,
         num_warps,
-        max_events_per_group
+        max_events_per_group,
+        1  /* enabled */
     );
     
     if (!profiler) {
