@@ -246,6 +246,7 @@ __device__ __forceinline__ void sm_profiler_event_start(
     ev->group_idx = group_idx;
     ev->sm_id = sm_profiler_get_smid();
     ev->type = SM_PROFILER_EVENT_TYPE_RANGE;
+    asm volatile("" ::: "memory");  // Compiler barrier to make accurate timestamp
     ev->st_timestamp_ns = sm_profiler_get_timestamp();
     ev->en_timestamp_ns = 0;
     
